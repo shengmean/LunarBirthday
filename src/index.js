@@ -55,7 +55,7 @@ const CHINESENEWYEAR = [
   "20560215", "20570204", "20580124", "20590212", "20600202", "20610121",
   "20620209", "20630129", "20640217", "20650205", "20660126", "20670214",
   "20680203", "20690123", "20700211", "20710131", "20720219", "20730207",
-  "20740127", "20750215", "20760205", "20770124", "20780212", "20790202",
+  "20740127", "20750211", "20760205", "20770124", "20780212", "20790202",
   "20800122", "20810209", "20820129", "20830217", "20840206", "20850126",
   "20860214", "20870203", "20880124", "20890210", "20900130", "20910218",
   "20920207", "20930127", "20940215", "20950205", "20960125", "20970212",
@@ -97,12 +97,11 @@ function daysFromNewYear(lunarYear, lunarMonth, lunarDay, leapMonth) {
 }
 
 function toSolarDate(lunarYear, lunarMonth, lunarDay, leapMonth = false) {
-  const yearCode = CHINESEYEARCODE[lunarYear - 1900];
   const newYearStr = CHINESENEWYEAR[lunarYear - 1900];
   const newYearDate = new Date(
-    newYearStr.slice(0, 4),
+    parseInt(newYearStr.slice(0, 4)),
     parseInt(newYearStr.slice(4, 6)) - 1,
-    newYearStr.slice(6, 8)
+    parseInt(newYearStr.slice(6, 8))
   );
   const daysPassed = daysFromNewYear(lunarYear, lunarMonth, lunarDay, leapMonth);
   const resultDate = new Date(newYearDate);
@@ -167,19 +166,16 @@ async function verifyJWT(token, secret) {
   }
 }
 
-// ==================== 认证中间件 ====================
 async function authenticate(request, env) {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   const token = authHeader.slice(7);
-
   const secret = await getJwtSecret(env);
   const jwtPayload = await verifyJWT(token, secret);
   if (jwtPayload && jwtPayload.user_id) {
     const user = await env.DB.prepare('SELECT id, username, role FROM users WHERE id = ?').bind(jwtPayload.user_id).first();
     return user;
   }
-
   const user = await env.DB.prepare('SELECT id, username, role FROM users WHERE api_key = ?').bind(token).first();
   return user;
 }
@@ -205,7 +201,7 @@ function nextLunarBirthday(lunarYear, lunarMonth, lunarDay, today) {
   return solar;
 }
 
-// ==================== 通知发送（示例实现） ====================
+// ==================== 通知发送（示例） ====================
 async function sendWechatApp(config, message) {
   const { corpid, corpsecret, agentid } = config;
   const tokenUrl = `https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${corpid}&corpsecret=${corpsecret}`;
@@ -221,9 +217,6 @@ async function sendWechatApp(config, message) {
   await fetch(sendUrl, { method: 'POST', body: JSON.stringify(body) });
 }
 
-// 其他渠道可在此扩展，例如：
-// async function sendTelegram(config, message) { ... }
-
 async function sendNotification(channel, context, env) {
   const config = channel.config;
   if (!config) return;
@@ -236,7 +229,6 @@ async function sendNotification(channel, context, env) {
     case 'wechat_app':
       await sendWechatApp(config, message);
       break;
-    // 添加其他类型...
     default:
       console.log(`Unsupported channel type: ${channel.type}`);
   }
@@ -307,7 +299,6 @@ async function scheduledCheckAndNotify(env) {
   for (const user of users.results) {
     const birthdays = await env.DB.prepare('SELECT * FROM birthdays WHERE user_id = ?').bind(user.id).all();
     const channels = await env.DB.prepare('SELECT id, type FROM notification_channels WHERE user_id = ? AND enabled = 1').bind(user.id).all();
-
     for (const birthday of birthdays.results) {
       let nextDate;
       if (birthday.is_solar) {
@@ -411,312 +402,297 @@ async function handleImport(request, env, userId) {
   return new Response(JSON.stringify({ success, errors }), { headers: { 'Content-Type': 'application/json' } });
 }
 
-// ==================== 前端 HTML ====================
-const HTML = `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>生日提醒系统</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/vue@2/dist/vue.js"></script>
-    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-</head>
-<body>
-<div id="app" class="container mt-4">
-    <div v-if="!token">
-        <h2>登录 / 注册</h2>
-        <div class="card p-3">
-            <div class="mb-3">
-                <input v-model="loginUsername" placeholder="用户名" class="form-control">
-                <input v-model="loginPassword" type="password" placeholder="密码" class="form-control mt-2">
-                <button class="btn btn-primary mt-2" @click="login">登录</button>
-            </div>
-            <hr>
-            <div v-if="multiUser">
-                <h4>注册新账号</h4>
-                <input v-model="regUsername" placeholder="用户名" class="form-control">
-                <input v-model="regPassword" type="password" placeholder="密码" class="form-control mt-2">
-                <button class="btn btn-secondary mt-2" @click="register">注册</button>
-            </div>
-        </div>
-    </div>
-    <div v-else>
-        <div class="d-flex justify-content-between align-items-center">
-            <h2>生日提醒系统</h2>
-            <button class="btn btn-danger" @click="logout">登出</button>
-        </div>
-        <ul class="nav nav-tabs mt-3">
-            <li class="nav-item"><a class="nav-link" :class="{active: activeTab==='birthdays'}" @click="activeTab='birthdays'" href="#">生日管理</a></li>
-            <li class="nav-item"><a class="nav-link" :class="{active: activeTab==='channels'}" @click="activeTab='channels'" href="#">通知渠道</a></li>
-        </ul>
-
-        <!-- 生日管理 -->
-        <div v-if="activeTab==='birthdays'" class="mt-3">
-            <div class="mb-3">
-                <button class="btn btn-primary" @click="newBirthday">新增生日</button>
-                <button class="btn btn-success" @click="showImportModal">批量导入</button>
-            </div>
-            <table class="table table-bordered">
-                <thead><tr><th>姓名</th><th>生日</th><th>类型</th><th>手机号</th><th>备注</th><th>操作</th></tr></thead>
-                <tbody>
-                    <tr v-for="b in birthdays" :key="b.id">
-                        <td>{{b.name}}</td>
-                        <td>{{b.birth_date}}</td>
-                        <td>{{b.is_solar ? '阳历' : '农历'}}</td>
-                        <td>{{b.phone}}</td>
-                        <td>{{b.note}}</td>
-                        <td>
-                            <button class="btn btn-sm btn-warning" @click="editBirthday(b)">编辑</button>
-                            <button class="btn btn-sm btn-danger" @click="deleteBirthday(b.id)">删除</button>
-                         </td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-
-        <!-- 通知渠道 -->
-        <div v-if="activeTab==='channels'" class="mt-3">
-            <button class="btn btn-primary mb-3" @click="newChannel">新增渠道</button>
-            <table class="table table-bordered">
-                <thead><tr><th>名称</th><th>类型</th><th>启用</th><th>操作</th></tr></thead>
-                <tbody>
-                    <tr v-for="c in channels" :key="c.id">
-                        <td>{{c.name}}</td>
-                        <td>{{c.type}}</td>
-                        <td>{{c.enabled ? '是' : '否'}}</td>
-                        <td>
-                            <button class="btn btn-sm btn-warning" @click="editChannel(c)">编辑</button>
-                            <button class="btn btn-sm btn-danger" @click="deleteChannel(c.id)">删除</button>
-                         </td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-
-        <!-- 编辑生日 Modal -->
-        <div v-if="showBirthdayModal" class="modal show d-block" tabindex="-1">
-            <div class="modal-dialog">
-                <div class="modal-content">
-                    <div class="modal-header"><h5>{{ isEditBirthday ? '编辑' : '新增' }}生日</h5><button class="btn-close" @click="closeModal"></button></div>
-                    <div class="modal-body">
-                        <div class="mb-3"><label>姓名</label><input v-model="birthdayForm.name" class="form-control"></div>
-                        <div class="mb-3"><label>生日 (YYYY-MM-DD)</label><input v-model="birthdayForm.birth_date" class="form-control"></div>
-                        <div class="mb-3 form-check"><input type="checkbox" v-model="birthdayForm.is_solar" class="form-check-input"><label>阳历生日</label></div>
-                        <div class="mb-3"><label>手机号</label><input v-model="birthdayForm.phone" class="form-control"></div>
-                        <div class="mb-3"><label>备注</label><textarea v-model="birthdayForm.note" class="form-control"></textarea></div>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn btn-secondary" @click="closeModal">取消</button>
-                        <button class="btn btn-primary" @click="saveBirthday">保存</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- 编辑渠道 Modal -->
-        <div v-if="showChannelModal" class="modal show d-block" tabindex="-1">
-            <div class="modal-dialog">
-                <div class="modal-content">
-                    <div class="modal-header"><h5>{{ isEditChannel ? '编辑' : '新增' }}渠道</h5><button class="btn-close" @click="closeModal"></button></div>
-                    <div class="modal-body">
-                        <div class="mb-3"><label>渠道名称</label><input v-model="channelForm.name" class="form-control"></div>
-                        <div class="mb-3"><label>类型</label>
-                            <select v-model="channelForm.type" class="form-control">
-                                <option value="wechat_app">企业微信应用</option>
-                                <option value="wechat_robot">企业微信机器人</option>
-                                <option value="telegram">Telegram Bot</option>
-                                <option value="dingtalk">钉钉机器人</option>
-                                <option value="feishu">飞书机器人</option>
-                                <option value="pushover">Pushover</option>
-                                <option value="custom">自定义 Webhook</option>
-                            </select>
-                        </div>
-                        <div class="mb-3 form-check"><input type="checkbox" v-model="channelForm.enabled" class="form-check-input"><label>启用</label></div>
-                        <div class="mb-3"><label>配置 (JSON)</label><textarea v-model="channelForm.config" class="form-control" rows="5"></textarea></div>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn btn-secondary" @click="closeModal">取消</button>
-                        <button class="btn btn-primary" @click="saveChannel">保存</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- 导入 Modal -->
-        <div v-if="showImport" class="modal show d-block" tabindex="-1">
-            <div class="modal-dialog">
-                <div class="modal-content">
-                    <div class="modal-header"><h5>批量导入生日</h5><button class="btn-close" @click="closeImport"></button></div>
-                    <div class="modal-body">
-                        <input type="file" id="csvFile" accept=".csv" class="form-control">
-                        <div class="mt-2">CSV 格式：姓名,生日,农历生日,手机号,备注</div>
-                        <div class="mt-2"><button class="btn btn-sm btn-secondary" @click="downloadTemplate">下载模板</button></div>
-                    </div>
-                    <div class="modal-footer">
-                        <button class="btn btn-secondary" @click="closeImport">取消</button>
-                        <button class="btn btn-primary" @click="importData">导入</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div v-if="showBirthdayModal || showChannelModal || showImport" class="modal-backdrop show"></div>
-    </div>
-</div>
-
-<script>
-new Vue({
-    el: '#app',
-    data: {
-        token: localStorage.getItem('token') || '',
-        user: null,
-        multiUser: false,
-        activeTab: 'birthdays',
-        birthdays: [],
-        channels: [],
-        showBirthdayModal: false,
-        showChannelModal: false,
-        showImport: false,
-        isEditBirthday: false,
-        isEditChannel: false,
-        birthdayForm: { id: null, name: '', birth_date: '', is_solar: true, phone: '', note: '' },
-        channelForm: { id: null, name: '', type: 'wechat_app', enabled: true, config: '{}' },
-        loginUsername: '', loginPassword: '',
-        regUsername: '', regPassword: ''
-    },
-    async mounted() {
-        await this.loadConfig();
-        if (this.token) {
-            this.loadData();
-        }
-    },
-    methods: {
-        async loadConfig() {
-            const res = await fetch('/api/config');
-            const data = await res.json();
-            this.multiUser = data.multiUser;
-        },
-        async loadData() {
-            const birthdaysRes = await fetch('/api/birthdays', { headers: { Authorization: 'Bearer ' + this.token } });
-            if (birthdaysRes.ok) this.birthdays = await birthdaysRes.json();
-            const channelsRes = await fetch('/api/channels', { headers: { Authorization: 'Bearer ' + this.token } });
-            if (channelsRes.ok) this.channels = await channelsRes.json();
-        },
-        async login() {
-            const res = await fetch('/api/login', { method: 'POST', body: JSON.stringify({ username: this.loginUsername, password: this.loginPassword }) });
-            if (res.ok) {
-                const data = await res.json();
-                this.token = data.token;
-                this.user = data.user;
-                localStorage.setItem('token', this.token);
-                this.loadData();
-            } else alert('登录失败');
-        },
-        async register() {
-            const res = await fetch('/api/register', { method: 'POST', body: JSON.stringify({ username: this.regUsername, password: this.regPassword }) });
-            if (res.ok) {
-                const data = await res.json();
-                this.token = data.token;
-                this.user = data.user;
-                localStorage.setItem('token', this.token);
-                this.loadData();
-            } else alert('注册失败');
-        },
-        logout() {
-            localStorage.removeItem('token');
-            this.token = '';
-            this.user = null;
-        },
-        newBirthday() { this.isEditBirthday = false; this.birthdayForm = { id: null, name: '', birth_date: '', is_solar: true, phone: '', note: '' }; this.showBirthdayModal = true; },
-        editBirthday(b) { this.isEditBirthday = true; this.birthdayForm = { ...b }; this.showBirthdayModal = true; },
-        async saveBirthday() {
-            const url = this.isEditBirthday ? '/api/birthdays/' + this.birthdayForm.id : '/api/birthdays';
-            const method = this.isEditBirthday ? 'PUT' : 'POST';
-            const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + this.token }, body: JSON.stringify(this.birthdayForm) });
-            if (res.ok) { this.loadData(); this.closeModal(); }
-        },
-        async deleteBirthday(id) {
-            if (confirm('确认删除？')) {
-                await fetch('/api/birthdays/' + id, { method: 'DELETE', headers: { Authorization: 'Bearer ' + this.token } });
-                this.loadData();
-            }
-        },
-        newChannel() { this.isEditChannel = false; this.channelForm = { id: null, name: '', type: 'wechat_app', enabled: true, config: '{}' }; this.showChannelModal = true; },
-        editChannel(c) { this.isEditChannel = true; this.channelForm = { ...c, config: c.config ? JSON.stringify(c.config) : '{}' }; this.showChannelModal = true; },
-        async saveChannel() {
-            let configObj;
-            try { configObj = JSON.parse(this.channelForm.config); } catch(e) { alert('配置不是有效的 JSON'); return; }
-            const payload = { ...this.channelForm, config: configObj };
-            delete payload.id;
-            const url = this.isEditChannel ? '/api/channels/' + this.channelForm.id : '/api/channels';
-            const method = this.isEditChannel ? 'PUT' : 'POST';
-            const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + this.token }, body: JSON.stringify(payload) });
-            if (res.ok) { this.loadData(); this.closeModal(); }
-        },
-        async deleteChannel(id) {
-            if (confirm('确认删除？')) {
-                await fetch('/api/channels/' + id, { method: 'DELETE', headers: { Authorization: 'Bearer ' + this.token } });
-                this.loadData();
-            }
-        },
-        showImportModal() { this.showImport = true; },
-        closeImport() { this.showImport = false; },
-        closeModal() { this.showBirthdayModal = false; this.showChannelModal = false; this.showImport = false; },
-        downloadTemplate() {
-            const csv = "姓名,生日,农历生日,手机号,备注\n张三,1990-01-01,,13800000000,同事\n李四,1985-05-20,1985-04-01,13900000000,朋友";
-            const blob = new Blob([csv], { type: 'text/csv' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'birthday_template.csv';
-            a.click();
-            URL.revokeObjectURL(url);
-        },
-        async importData() {
-            const file = document.getElementById('csvFile').files[0];
-            if (!file) { alert('请选择 CSV 文件'); return; }
-            Papa.parse(file, {
-                header: true,
-                skipEmptyLines: true,
-                complete: async (results) => {
-                    const records = results.data.map(row => ({
-                        name: row['姓名'],
-                        birth_date: row['生日'],
-                        lunar_birth_date: row['农历生日'],
-                        phone: row['手机号'],
-                        note: row['备注']
-                    }));
-                    const res = await fetch('/api/import', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + this.token },
-                        body: JSON.stringify({ records })
-                    });
-                    const data = await res.json();
-                    alert(`成功导入 ${data.success} 条，失败 ${data.errors.length} 条`);
-                    if (data.errors.length) console.error(data.errors);
-                    this.loadData();
-                    this.closeImport();
-                }
-            });
-        }
-    }
-});
-</script>
-<style>
-.modal-backdrop { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1040; }
-.modal { z-index: 1050; }
-</style>
-</body>
-</html>`;
+// ==================== 前端 HTML（使用数组拼接避免语法错误） ====================
+const HTML = [
+  '<!DOCTYPE html>',
+  '<html>',
+  '<head>',
+  '<meta charset="utf-8">',
+  '<meta name="viewport" content="width=device-width, initial-scale=1">',
+  '<title>生日提醒系统</title>',
+  '<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">',
+  '<script src="https://cdn.jsdelivr.net/npm/vue@2/dist/vue.js"></script>',
+  '<script src="https://unpkg.com/axios/dist/axios.min.js"></script>',
+  '<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>',
+  '</head>',
+  '<body>',
+  '<div id="app" class="container mt-4">',
+  '  <div v-if="!token">',
+  '    <h2>登录 / 注册</h2>',
+  '    <div class="card p-3">',
+  '      <div class="mb-3">',
+  '        <input v-model="loginUsername" placeholder="用户名" class="form-control">',
+  '        <input v-model="loginPassword" type="password" placeholder="密码" class="form-control mt-2">',
+  '        <button class="btn btn-primary mt-2" @click="login">登录</button>',
+  '      </div>',
+  '      <hr>',
+  '      <div v-if="multiUser">',
+  '        <h4>注册新账号</h4>',
+  '        <input v-model="regUsername" placeholder="用户名" class="form-control">',
+  '        <input v-model="regPassword" type="password" placeholder="密码" class="form-control mt-2">',
+  '        <button class="btn btn-secondary mt-2" @click="register">注册</button>',
+  '      </div>',
+  '    </div>',
+  '  </div>',
+  '  <div v-else>',
+  '    <div class="d-flex justify-content-between align-items-center">',
+  '      <h2>生日提醒系统</h2>',
+  '      <button class="btn btn-danger" @click="logout">登出</button>',
+  '    </div>',
+  '    <ul class="nav nav-tabs mt-3">',
+  '      <li class="nav-item"><a class="nav-link" :class="{active: activeTab===\'birthdays\'}" @click="activeTab=\'birthdays\'" href="#">生日管理</a></li>',
+  '      <li class="nav-item"><a class="nav-link" :class="{active: activeTab===\'channels\'}" @click="activeTab=\'channels\'" href="#">通知渠道</a></li>',
+  '    </ul>',
+  '    <div v-if="activeTab===\'birthdays\'" class="mt-3">',
+  '      <div class="mb-3">',
+  '        <button class="btn btn-primary" @click="newBirthday">新增生日</button>',
+  '        <button class="btn btn-success" @click="showImportModal">批量导入</button>',
+  '      </div>',
+  '      <table class="table table-bordered">',
+  '        <thead><tr><th>姓名</th><th>生日</th><th>类型</th><th>手机号</th><th>备注</th><th>操作</th></tr></thead>',
+  '        <tbody>',
+  '          <tr v-for="b in birthdays" :key="b.id">',
+  '            <td>{{b.name}}</td>',
+  '            <td>{{b.birth_date}}</td>',
+  '            <td>{{b.is_solar ? "阳历" : "农历"}}</td>',
+  '            <td>{{b.phone}}</td>',
+  '            <td>{{b.note}}</td>',
+  '            <td>',
+  '              <button class="btn btn-sm btn-warning" @click="editBirthday(b)">编辑</button>',
+  '              <button class="btn btn-sm btn-danger" @click="deleteBirthday(b.id)">删除</button>',
+  '            </td>',
+  '          </tr>',
+  '        </tbody>',
+  '      </table>',
+  '    </div>',
+  '    <div v-if="activeTab===\'channels\'" class="mt-3">',
+  '      <button class="btn btn-primary mb-3" @click="newChannel">新增渠道</button>',
+  '      <table class="table table-bordered">',
+  '        <thead><tr><th>名称</th><th>类型</th><th>启用</th><th>操作</th></tr></thead>',
+  '        <tbody>',
+  '          <tr v-for="c in channels" :key="c.id">',
+  '            <td>{{c.name}}</td>',
+  '            <td>{{c.type}}</td>',
+  '            <td>{{c.enabled ? "是" : "否"}}</td>',
+  '            <td>',
+  '              <button class="btn btn-sm btn-warning" @click="editChannel(c)">编辑</button>',
+  '              <button class="btn btn-sm btn-danger" @click="deleteChannel(c.id)">删除</button>',
+  '            </td>',
+  '          </tr>',
+  '        </tbody>',
+  '      </table>',
+  '    </div>',
+  '    <div v-if="showBirthdayModal" class="modal show d-block" tabindex="-1">',
+  '      <div class="modal-dialog">',
+  '        <div class="modal-content">',
+  '          <div class="modal-header"><h5>{{ isEditBirthday ? "编辑" : "新增" }}生日</h5><button class="btn-close" @click="closeModal"></button></div>',
+  '          <div class="modal-body">',
+  '            <div class="mb-3"><label>姓名</label><input v-model="birthdayForm.name" class="form-control"></div>',
+  '            <div class="mb-3"><label>生日 (YYYY-MM-DD)</label><input v-model="birthdayForm.birth_date" class="form-control"></div>',
+  '            <div class="mb-3 form-check"><input type="checkbox" v-model="birthdayForm.is_solar" class="form-check-input"><label>阳历生日</label></div>',
+  '            <div class="mb-3"><label>手机号</label><input v-model="birthdayForm.phone" class="form-control"></div>',
+  '            <div class="mb-3"><label>备注</label><textarea v-model="birthdayForm.note" class="form-control"></textarea></div>',
+  '          </div>',
+  '          <div class="modal-footer">',
+  '            <button class="btn btn-secondary" @click="closeModal">取消</button>',
+  '            <button class="btn btn-primary" @click="saveBirthday">保存</button>',
+  '          </div>',
+  '        </div>',
+  '      </div>',
+  '    </div>',
+  '    <div v-if="showChannelModal" class="modal show d-block" tabindex="-1">',
+  '      <div class="modal-dialog">',
+  '        <div class="modal-content">',
+  '          <div class="modal-header"><h5>{{ isEditChannel ? "编辑" : "新增" }}渠道</h5><button class="btn-close" @click="closeModal"></button></div>',
+  '          <div class="modal-body">',
+  '            <div class="mb-3"><label>渠道名称</label><input v-model="channelForm.name" class="form-control"></div>',
+  '            <div class="mb-3"><label>类型</label>',
+  '              <select v-model="channelForm.type" class="form-control">',
+  '                <option value="wechat_app">企业微信应用</option>',
+  '                <option value="wechat_robot">企业微信机器人</option>',
+  '                <option value="telegram">Telegram Bot</option>',
+  '                <option value="dingtalk">钉钉机器人</option>',
+  '                <option value="feishu">飞书机器人</option>',
+  '                <option value="pushover">Pushover</option>',
+  '                <option value="custom">自定义 Webhook</option>',
+  '              </select>',
+  '            </div>',
+  '            <div class="mb-3 form-check"><input type="checkbox" v-model="channelForm.enabled" class="form-check-input"><label>启用</label></div>',
+  '            <div class="mb-3"><label>配置 (JSON)</label><textarea v-model="channelForm.config" class="form-control" rows="5"></textarea></div>',
+  '          </div>',
+  '          <div class="modal-footer">',
+  '            <button class="btn btn-secondary" @click="closeModal">取消</button>',
+  '            <button class="btn btn-primary" @click="saveChannel">保存</button>',
+  '          </div>',
+  '        </div>',
+  '      </div>',
+  '    </div>',
+  '    <div v-if="showImport" class="modal show d-block" tabindex="-1">',
+  '      <div class="modal-dialog">',
+  '        <div class="modal-content">',
+  '          <div class="modal-header"><h5>批量导入生日</h5><button class="btn-close" @click="closeImport"></button></div>',
+  '          <div class="modal-body">',
+  '            <input type="file" id="csvFile" accept=".csv" class="form-control">',
+  '            <div class="mt-2">CSV 格式：姓名,生日,农历生日,手机号,备注</div>',
+  '            <div class="mt-2"><button class="btn btn-sm btn-secondary" @click="downloadTemplate">下载模板</button></div>',
+  '          </div>',
+  '          <div class="modal-footer">',
+  '            <button class="btn btn-secondary" @click="closeImport">取消</button>',
+  '            <button class="btn btn-primary" @click="importData">导入</button>',
+  '          </div>',
+  '        </div>',
+  '      </div>',
+  '    </div>',
+  '    <div v-if="showBirthdayModal || showChannelModal || showImport" class="modal-backdrop show"></div>',
+  '  </div>',
+  '</div>',
+  '<script>',
+  'new Vue({',
+  '  el: "#app",',
+  '  data: {',
+  '    token: localStorage.getItem("token") || "",',
+  '    user: null,',
+  '    multiUser: false,',
+  '    activeTab: "birthdays",',
+  '    birthdays: [],',
+  '    channels: [],',
+  '    showBirthdayModal: false,',
+  '    showChannelModal: false,',
+  '    showImport: false,',
+  '    isEditBirthday: false,',
+  '    isEditChannel: false,',
+  '    birthdayForm: { id: null, name: "", birth_date: "", is_solar: true, phone: "", note: "" },',
+  '    channelForm: { id: null, name: "", type: "wechat_app", enabled: true, config: "{}" },',
+  '    loginUsername: "", loginPassword: "",',
+  '    regUsername: "", regPassword: ""',
+  '  },',
+  '  async mounted() {',
+  '    await this.loadConfig();',
+  '    if (this.token) this.loadData();',
+  '  },',
+  '  methods: {',
+  '    async loadConfig() {',
+  '      const res = await fetch("/api/config");',
+  '      const data = await res.json();',
+  '      this.multiUser = data.multiUser;',
+  '    },',
+  '    async loadData() {',
+  '      const birthdaysRes = await fetch("/api/birthdays", { headers: { Authorization: "Bearer " + this.token } });',
+  '      if (birthdaysRes.ok) this.birthdays = await birthdaysRes.json();',
+  '      const channelsRes = await fetch("/api/channels", { headers: { Authorization: "Bearer " + this.token } });',
+  '      if (channelsRes.ok) this.channels = await channelsRes.json();',
+  '    },',
+  '    async login() {',
+  '      const res = await fetch("/api/login", { method: "POST", body: JSON.stringify({ username: this.loginUsername, password: this.loginPassword }) });',
+  '      if (res.ok) {',
+  '        const data = await res.json();',
+  '        this.token = data.token;',
+  '        this.user = data.user;',
+  '        localStorage.setItem("token", this.token);',
+  '        this.loadData();',
+  '      } else alert("登录失败");',
+  '    },',
+  '    async register() {',
+  '      const res = await fetch("/api/register", { method: "POST", body: JSON.stringify({ username: this.regUsername, password: this.regPassword }) });',
+  '      if (res.ok) {',
+  '        const data = await res.json();',
+  '        this.token = data.token;',
+  '        this.user = data.user;',
+  '        localStorage.setItem("token", this.token);',
+  '        this.loadData();',
+  '      } else alert("注册失败");',
+  '    },',
+  '    logout() {',
+  '      localStorage.removeItem("token");',
+  '      this.token = "";',
+  '      this.user = null;',
+  '    },',
+  '    newBirthday() { this.isEditBirthday = false; this.birthdayForm = { id: null, name: "", birth_date: "", is_solar: true, phone: "", note: "" }; this.showBirthdayModal = true; },',
+  '    editBirthday(b) { this.isEditBirthday = true; this.birthdayForm = { ...b }; this.showBirthdayModal = true; },',
+  '    async saveBirthday() {',
+  '      const url = this.isEditBirthday ? "/api/birthdays/" + this.birthdayForm.id : "/api/birthdays";',
+  '      const method = this.isEditBirthday ? "PUT" : "POST";',
+  '      const res = await fetch(url, { method, headers: { "Content-Type": "application/json", Authorization: "Bearer " + this.token }, body: JSON.stringify(this.birthdayForm) });',
+  '      if (res.ok) { this.loadData(); this.closeModal(); }',
+  '    },',
+  '    async deleteBirthday(id) {',
+  '      if (confirm("确认删除？")) {',
+  '        await fetch("/api/birthdays/" + id, { method: "DELETE", headers: { Authorization: "Bearer " + this.token } });',
+  '        this.loadData();',
+  '      }',
+  '    },',
+  '    newChannel() { this.isEditChannel = false; this.channelForm = { id: null, name: "", type: "wechat_app", enabled: true, config: "{}" }; this.showChannelModal = true; },',
+  '    editChannel(c) { this.isEditChannel = true; this.channelForm = { ...c, config: c.config ? JSON.stringify(c.config) : "{}" }; this.showChannelModal = true; },',
+  '    async saveChannel() {',
+  '      let configObj;',
+  '      try { configObj = JSON.parse(this.channelForm.config); } catch(e) { alert("配置不是有效的 JSON"); return; }',
+  '      const payload = { ...this.channelForm, config: configObj };',
+  '      delete payload.id;',
+  '      const url = this.isEditChannel ? "/api/channels/" + this.channelForm.id : "/api/channels";',
+  '      const method = this.isEditChannel ? "PUT" : "POST";',
+  '      const res = await fetch(url, { method, headers: { "Content-Type": "application/json", Authorization: "Bearer " + this.token }, body: JSON.stringify(payload) });',
+  '      if (res.ok) { this.loadData(); this.closeModal(); }',
+  '    },',
+  '    async deleteChannel(id) {',
+  '      if (confirm("确认删除？")) {',
+  '        await fetch("/api/channels/" + id, { method: "DELETE", headers: { Authorization: "Bearer " + this.token } });',
+  '        this.loadData();',
+  '      }',
+  '    },',
+  '    showImportModal() { this.showImport = true; },',
+  '    closeImport() { this.showImport = false; },',
+  '    closeModal() { this.showBirthdayModal = false; this.showChannelModal = false; this.showImport = false; },',
+  '    downloadTemplate() {',
+  '      const csv = "姓名,生日,农历生日,手机号,备注\\n张三,1990-01-01,,13800000000,同事\\n李四,1985-05-20,1985-04-01,13900000000,朋友";',
+  '      const blob = new Blob([csv], { type: "text/csv" });',
+  '      const url = URL.createObjectURL(blob);',
+  '      const a = document.createElement("a");',
+  '      a.href = url;',
+  '      a.download = "birthday_template.csv";',
+  '      a.click();',
+  '      URL.revokeObjectURL(url);',
+  '    },',
+  '    async importData() {',
+  '      const file = document.getElementById("csvFile").files[0];',
+  '      if (!file) { alert("请选择 CSV 文件"); return; }',
+  '      Papa.parse(file, {',
+  '        header: true,',
+  '        skipEmptyLines: true,',
+  '        complete: async (results) => {',
+  '          const records = results.data.map(row => ({',
+  '            name: row["姓名"],',
+  '            birth_date: row["生日"],',
+  '            lunar_birth_date: row["农历生日"],',
+  '            phone: row["手机号"],',
+  '            note: row["备注"]',
+  '          }));',
+  '          const res = await fetch("/api/import", {',
+  '            method: "POST",',
+  '            headers: { "Content-Type": "application/json", Authorization: "Bearer " + this.token },',
+  '            body: JSON.stringify({ records })',
+  '          });',
+  '          const data = await res.json();',
+  '          alert(`成功导入 ${data.success} 条，失败 ${data.errors.length} 条`);',
+  '          if (data.errors.length) console.error(data.errors);',
+  '          this.loadData();',
+  '          this.closeImport();',
+  '        }',
+  '      });',
+  '    }',
+  '  }',
+  '});',
+  '</script>',
+  '<style>.modal-backdrop { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1040; } .modal { z-index: 1050; }</style>',
+  '</body>',
+  '</html>'
+].join('\n');
 
 // ==================== 主路由 ====================
 export default {
   async fetch(request, env) {
-    const url = new URL(request.path);
+    const url = new URL(request.url);
     const path = url.pathname;
 
-    // 自动初始化数据库表
     await initTables(env);
     await initAdmin(env);
 
@@ -734,7 +710,6 @@ export default {
     // 需要认证的 API
     const user = await authenticate(request, env);
     if (!user && !path.startsWith('/api/')) {
-      // 返回前端页面
       return new Response(HTML, { headers: { 'Content-Type': 'text/html' } });
     }
     if (!user) {
