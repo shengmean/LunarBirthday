@@ -1,7 +1,3 @@
-// birthday-reminder/src/index.js
-// 生日提醒系统 - Cloudflare Workers 版本
-// 支持多用户、JWT认证、多通知渠道、农历转换
-
 // ==================== 农历转换模块 ====================
 const CHINESEYEARCODE = [
   19416, 19168, 42352, 21717, 53856, 55632, 91476, 22176, 39632,
@@ -177,7 +173,6 @@ async function authenticate(request, env) {
   if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
   const token = authHeader.slice(7);
 
-  // JWT 验证
   const secret = await getJwtSecret(env);
   const jwtPayload = await verifyJWT(token, secret);
   if (jwtPayload && jwtPayload.user_id) {
@@ -185,7 +180,6 @@ async function authenticate(request, env) {
     return user;
   }
 
-  // API Key 验证
   const user = await env.DB.prepare('SELECT id, username, role FROM users WHERE api_key = ?').bind(token).first();
   return user;
 }
@@ -197,7 +191,6 @@ function nextSolarBirthday(birthDateStr, today) {
   if (candidate < today) {
     candidate = new Date(today.getFullYear() + 1, month - 1, day);
   }
-  // 处理闰日
   if (month === 2 && day === 29 && candidate.getMonth() !== 1) {
     candidate = new Date(candidate.getFullYear(), 2, 1);
   }
@@ -212,11 +205,11 @@ function nextLunarBirthday(lunarYear, lunarMonth, lunarDay, today) {
   return solar;
 }
 
-// ==================== 通知发送（简化，仅演示） ====================
+// ==================== 通知发送（示例实现） ====================
 async function sendWechatApp(config, message) {
   const { corpid, corpsecret, agentid } = config;
-  const url = `https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${corpid}&corpsecret=${corpsecret}`;
-  const tokenResp = await fetch(url);
+  const tokenUrl = `https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${corpid}&corpsecret=${corpsecret}`;
+  const tokenResp = await fetch(tokenUrl);
   const { access_token } = await tokenResp.json();
   const sendUrl = `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${access_token}`;
   const body = {
@@ -227,6 +220,9 @@ async function sendWechatApp(config, message) {
   };
   await fetch(sendUrl, { method: 'POST', body: JSON.stringify(body) });
 }
+
+// 其他渠道可在此扩展，例如：
+// async function sendTelegram(config, message) { ... }
 
 async function sendNotification(channel, context, env) {
   const config = channel.config;
@@ -240,10 +236,69 @@ async function sendNotification(channel, context, env) {
     case 'wechat_app':
       await sendWechatApp(config, message);
       break;
-    // 其他渠道类似实现（可自行扩展）
+    // 添加其他类型...
     default:
       console.log(`Unsupported channel type: ${channel.type}`);
   }
+}
+
+// ==================== 数据库自动初始化 ====================
+let tablesInitialized = false;
+
+async function initTables(env) {
+  if (tablesInitialized) return;
+  try {
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE,
+        password_hash TEXT,
+        api_key TEXT UNIQUE NOT NULL,
+        role TEXT DEFAULT 'user',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `).run();
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS birthdays (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        birth_date TEXT NOT NULL,
+        is_solar INTEGER NOT NULL DEFAULT 1,
+        phone TEXT,
+        note TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `).run();
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS notification_channels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `).run();
+    tablesInitialized = true;
+  } catch (err) {
+    console.error('Failed to initialize tables:', err);
+  }
+}
+
+async function initAdmin(env) {
+  const adminUsername = env.ADMIN_USERNAME;
+  const adminPassword = env.ADMIN_PASSWORD;
+  if (!adminUsername || !adminPassword) return;
+  const existing = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(adminUsername).first();
+  if (existing) return;
+  const passwordHash = await hashPassword(adminPassword);
+  const apiKey = crypto.randomUUID().replace(/-/g, '');
+  await env.DB.prepare(
+    `INSERT INTO users (username, password_hash, role, api_key) VALUES (?, ?, 'admin', ?)`
+  ).bind(adminUsername, passwordHash, apiKey).run();
 }
 
 // ==================== 定时任务 ====================
@@ -332,17 +387,28 @@ async function handleRegister(request, env) {
   return new Response(JSON.stringify({ token, user: { id: userId, username, role: 'user' } }), { status: 201 });
 }
 
-async function initAdmin(env) {
-  const adminUsername = env.ADMIN_USERNAME;
-  const adminPassword = env.ADMIN_PASSWORD;
-  if (!adminUsername || !adminPassword) return;
-  const existing = await env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(adminUsername).first();
-  if (existing) return;
-  const passwordHash = await hashPassword(adminPassword);
-  const apiKey = crypto.randomUUID().replace(/-/g, '');
-  await env.DB.prepare(
-    `INSERT INTO users (username, password_hash, role, api_key) VALUES (?, ?, 'admin', ?)`
-  ).bind(adminUsername, passwordHash, apiKey).run();
+async function handleImport(request, env, userId) {
+  const { records } = await request.json();
+  let success = 0, errors = [];
+  for (const rec of records) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO birthdays (user_id, name, birth_date, is_solar, phone, note)
+         VALUES (?, ?, ?, 1, ?, ?)`
+      ).bind(userId, rec.name, rec.birth_date, rec.phone, rec.note).run();
+      success++;
+      if (rec.lunar_birth_date && rec.lunar_birth_date !== rec.birth_date) {
+        await env.DB.prepare(
+          `INSERT INTO birthdays (user_id, name, birth_date, is_solar, phone, note)
+           VALUES (?, ?, ?, 0, ?, ?)`
+        ).bind(userId, rec.name, rec.lunar_birth_date, rec.phone, rec.note).run();
+        success++;
+      }
+    } catch (e) {
+      errors.push({ record: rec, error: e.message });
+    }
+  }
+  return new Response(JSON.stringify({ success, errors }), { headers: { 'Content-Type': 'application/json' } });
 }
 
 // ==================== 前端 HTML ====================
@@ -355,6 +421,7 @@ const HTML = `<!DOCTYPE html>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/vue@2/dist/vue.js"></script>
     <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 </head>
 <body>
 <div id="app" class="container mt-4">
@@ -387,7 +454,10 @@ const HTML = `<!DOCTYPE html>
 
         <!-- 生日管理 -->
         <div v-if="activeTab==='birthdays'" class="mt-3">
-            <button class="btn btn-primary mb-3" @click="newBirthday">新增生日</button>
+            <div class="mb-3">
+                <button class="btn btn-primary" @click="newBirthday">新增生日</button>
+                <button class="btn btn-success" @click="showImportModal">批量导入</button>
+            </div>
             <table class="table table-bordered">
                 <thead><tr><th>姓名</th><th>生日</th><th>类型</th><th>手机号</th><th>备注</th><th>操作</th></tr></thead>
                 <tbody>
@@ -400,7 +470,7 @@ const HTML = `<!DOCTYPE html>
                         <td>
                             <button class="btn btn-sm btn-warning" @click="editBirthday(b)">编辑</button>
                             <button class="btn btn-sm btn-danger" @click="deleteBirthday(b.id)">删除</button>
-                        </td>
+                         </td>
                     </tr>
                 </tbody>
             </table>
@@ -419,7 +489,7 @@ const HTML = `<!DOCTYPE html>
                         <td>
                             <button class="btn btn-sm btn-warning" @click="editChannel(c)">编辑</button>
                             <button class="btn btn-sm btn-danger" @click="deleteChannel(c.id)">删除</button>
-                        </td>
+                         </td>
                     </tr>
                 </tbody>
             </table>
@@ -455,7 +525,12 @@ const HTML = `<!DOCTYPE html>
                         <div class="mb-3"><label>类型</label>
                             <select v-model="channelForm.type" class="form-control">
                                 <option value="wechat_app">企业微信应用</option>
-                                <!-- 可扩展其他类型 -->
+                                <option value="wechat_robot">企业微信机器人</option>
+                                <option value="telegram">Telegram Bot</option>
+                                <option value="dingtalk">钉钉机器人</option>
+                                <option value="feishu">飞书机器人</option>
+                                <option value="pushover">Pushover</option>
+                                <option value="custom">自定义 Webhook</option>
                             </select>
                         </div>
                         <div class="mb-3 form-check"><input type="checkbox" v-model="channelForm.enabled" class="form-check-input"><label>启用</label></div>
@@ -468,7 +543,25 @@ const HTML = `<!DOCTYPE html>
                 </div>
             </div>
         </div>
-        <div v-if="showBirthdayModal || showChannelModal" class="modal-backdrop show"></div>
+
+        <!-- 导入 Modal -->
+        <div v-if="showImport" class="modal show d-block" tabindex="-1">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header"><h5>批量导入生日</h5><button class="btn-close" @click="closeImport"></button></div>
+                    <div class="modal-body">
+                        <input type="file" id="csvFile" accept=".csv" class="form-control">
+                        <div class="mt-2">CSV 格式：姓名,生日,农历生日,手机号,备注</div>
+                        <div class="mt-2"><button class="btn btn-sm btn-secondary" @click="downloadTemplate">下载模板</button></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" @click="closeImport">取消</button>
+                        <button class="btn btn-primary" @click="importData">导入</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div v-if="showBirthdayModal || showChannelModal || showImport" class="modal-backdrop show"></div>
     </div>
 </div>
 
@@ -484,6 +577,7 @@ new Vue({
         channels: [],
         showBirthdayModal: false,
         showChannelModal: false,
+        showImport: false,
         isEditBirthday: false,
         isEditChannel: false,
         birthdayForm: { id: null, name: '', birth_date: '', is_solar: true, phone: '', note: '' },
@@ -566,7 +660,46 @@ new Vue({
                 this.loadData();
             }
         },
-        closeModal() { this.showBirthdayModal = false; this.showChannelModal = false; }
+        showImportModal() { this.showImport = true; },
+        closeImport() { this.showImport = false; },
+        closeModal() { this.showBirthdayModal = false; this.showChannelModal = false; this.showImport = false; },
+        downloadTemplate() {
+            const csv = "姓名,生日,农历生日,手机号,备注\n张三,1990-01-01,,13800000000,同事\n李四,1985-05-20,1985-04-01,13900000000,朋友";
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'birthday_template.csv';
+            a.click();
+            URL.revokeObjectURL(url);
+        },
+        async importData() {
+            const file = document.getElementById('csvFile').files[0];
+            if (!file) { alert('请选择 CSV 文件'); return; }
+            Papa.parse(file, {
+                header: true,
+                skipEmptyLines: true,
+                complete: async (results) => {
+                    const records = results.data.map(row => ({
+                        name: row['姓名'],
+                        birth_date: row['生日'],
+                        lunar_birth_date: row['农历生日'],
+                        phone: row['手机号'],
+                        note: row['备注']
+                    }));
+                    const res = await fetch('/api/import', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + this.token },
+                        body: JSON.stringify({ records })
+                    });
+                    const data = await res.json();
+                    alert(`成功导入 ${data.success} 条，失败 ${data.errors.length} 条`);
+                    if (data.errors.length) console.error(data.errors);
+                    this.loadData();
+                    this.closeImport();
+                }
+            });
+        }
     }
 });
 </script>
@@ -580,10 +713,11 @@ new Vue({
 // ==================== 主路由 ====================
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
+    const url = new URL(request.path);
     const path = url.pathname;
 
-    // 初始化管理员
+    // 自动初始化数据库表
+    await initTables(env);
     await initAdmin(env);
 
     // 公开路由
@@ -673,9 +807,15 @@ export default {
       }
     }
 
+    // 导入接口
+    if (path === '/api/import' && request.method === 'POST') {
+      return handleImport(request, env, user.id);
+    }
+
     return new Response('Not Found', { status: 404 });
   },
   async scheduled(event, env, ctx) {
+    await initTables(env);
     ctx.waitUntil(scheduledCheckAndNotify(env));
   }
 };
